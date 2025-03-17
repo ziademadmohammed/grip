@@ -29,9 +29,9 @@ build: embed-manifest check-build-dir
 	@echo "Build complete! Binary is in the $(BUILD_DIR) directory."
 
 # Run the application
-run: embed-manifest check-build-dir
+run: check-build-dir
 	@echo "Running the application..."
-	CGO_ENABLED=1 $(GO) run -ldflags="-r $(BUILD_DIR)" cmd/netmonitor/main.go debug
+	CGO_ENABLED=1 $(GO) run -ldflags="-r $(BUILD_DIR)" cmd/netmonitor/main.go cmd/netmonitor/svc.go cmd/netmonitor/logging.go cmd/netmonitor/stats.go debug
 
 # Clean the build directory
 clean:
