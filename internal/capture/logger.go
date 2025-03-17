@@ -5,7 +5,6 @@ import (
 	"time"
 
 	"grip/internal/logger"
-	"grip/internal/process"
 )
 
 type PacketLog struct {
@@ -54,36 +53,21 @@ func CloseLogger() {
 }
 
 // LogPacket handles packet logging with process information
-func LogPacket(deviceName string, src, srcPort, dst, dstPort, protocol string, length int, direction string, procInfo *process.ProcessInfo) {
+func LogPacket(device_id int64, src, srcPort, dst, dstPort, protocol string, length int, direction string, ProcessPath string) {
 	// Skip if info logging is disabled
 	if !logger.IsInfoEnabled() {
 		return
 	}
 
-	if procInfo != nil {
-		logger.Info("[%s] %s:%s -> %s:%s, Protocol: %s, Length: %d bytes, Direction: %s, Process: %s (%d) [%s]",
-			deviceName,
-			src, srcPort,
-			dst, dstPort,
-			protocol,
-			length,
-			direction,
-			procInfo.ProcessName,
-			procInfo.ProcessID,
-			procInfo.ExecutablePath,
-		)
-	} else {
-		logger.Info("[%s] %s:%s -> %s:%s, Protocol: %s, Length: %d bytes, Direction: %s",
-			deviceName,
-			src, srcPort,
-			dst, dstPort,
-			protocol,
-			length,
-			direction,
-		)
-	}
-
-	// JSON packet logging could be added here if needed
+	logger.Info("[%d] %s:%s -> %s:%s, Protocol: %s, Length: %d bytes, Direction: %s, Process: %s",
+		device_id,
+		src, srcPort,
+		dst, dstPort,
+		protocol,
+		length,
+		direction,
+		ProcessPath,
+	)
 }
 
 // LogInterface logs information about network interfaces

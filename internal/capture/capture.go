@@ -4,11 +4,9 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"os"
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/google/gopacket"
@@ -31,35 +29,7 @@ var (
 	packetCounter uint64
 )
 
-func checkNpcapInstallation() error {
-	// Common paths where wpcap.dll might be located
-	paths := []string{
-		"C:\\Windows\\System32\\Npcap\\wpcap.dll",
-		"C:\\Windows\\System32\\wpcap.dll",
-		"C:\\Windows\\SysWOW64\\Npcap\\wpcap.dll",
-		"C:\\Windows\\SysWOW64\\wpcap.dll",
-	}
-
-	for _, path := range paths {
-		if _, err := os.Stat(path); err == nil {
-			return nil
-		}
-	}
-
-	return fmt.Errorf("Npcap/WinPcap not found. Please install Npcap from https://npcap.com/#download")
-}
-
 func StartCapture() error {
-	// Initialize database
-	if err := database.InitDatabase(); err != nil {
-		return fmt.Errorf("failed to initialize database: %v", err)
-	}
-
-	// Check for Npcap installation
-	if err := checkNpcapInstallation(); err != nil {
-		return err
-	}
-
 	// Get a list of all network devices
 	devices, err := pcap.FindAllDevs()
 	if err != nil {
@@ -195,8 +165,7 @@ func lookupProcessInfo(protocol string, srcPortInt, dstPortInt uint16, direction
 	return nil, fmt.Errorf("process not found")
 }
 
-// Create and store a packet record
-func createAndStorePacket(deviceName, src, srcPort, dst, dstPort, protocol string, length int, direction string, processInfo *process.ProcessInfo) {
+func createPacketRecord(deviceName, src, srcPort, dst, dstPort, protocol string, length int, direction string, processInfo *process.ProcessInfo) database.PacketRecord {
 	// Get device ID from map
 	deviceMapMutex.RLock()
 	deviceID, exists := deviceIDMap[deviceName]
@@ -204,7 +173,6 @@ func createAndStorePacket(deviceName, src, srcPort, dst, dstPort, protocol strin
 
 	if !exists {
 		LogError("No device ID found for device: %s", deviceName)
-		return
 	}
 
 	// Create packet record
@@ -237,13 +205,30 @@ func createAndStorePacket(deviceName, src, srcPort, dst, dstPort, protocol strin
 		)
 	}
 
+	return record
+}
+
+// Create and store a packet record
+func StorePacketRecord(packetRecord database.PacketRecord) {
 	// Store in database
-	if err := database.StorePacket(record); err != nil {
+	if err := database.StorePacket(packetRecord); err != nil {
 		LogDebug("Error storing packet in database: %v", err)
 	}
+}
 
+func logPacket(packetRecord database.PacketRecord) {
 	// Log packet information (still use device name for logging)
-	LogPacket(deviceName, src, srcPort, dst, dstPort, protocol, length, direction, processInfo)
+	LogPacket(
+		packetRecord.DeviceID,
+		packetRecord.SrcIP,
+		packetRecord.SrcPort,
+		packetRecord.DstIP,
+		packetRecord.DstPort,
+		packetRecord.Protocol,
+		packetRecord.Length,
+		packetRecord.Direction,
+		packetRecord.ProcessPath,
+	)
 }
 
 func StopCapture() {
@@ -316,17 +301,17 @@ func processPacket(deviceName string, packet gopacket.Packet) {
 	}
 
 	// Update statistics
-	updateStats(uint64(length))
-	incrementProtocolCount(protocol)
+	// updateStats(uint64(length))
+	// incrementProtocolCount(protocol)
 
 	// Increment packet counter
-	newCount := atomic.AddUint64(&packetCounter, 1)
+	// newCount := atomic.AddUint64(&packetCounter, 1)
 
 	// Every 1000 packets, save stats
-	if newCount%1000 == 0 {
-		LogDebug("Processing packet #%d, triggering stats save", newCount)
-		go SaveAllStatsToDB()
-	}
+	// if newCount%1000 == 0 {
+	// 	LogDebug("Processing packet #%d, triggering stats save", newCount)
+	// 	go SaveAllStatsToDB()
+	// }
 
 	// Parse port strings to integers for process lookup
 	srcPortInt := uint16(0)
@@ -348,6 +333,9 @@ func processPacket(deviceName string, packet gopacket.Packet) {
 			src, srcPort, dst, dstPort, protocol, err)
 	}
 
+	packetRecord := createPacketRecord(deviceName, src, srcPort, dst, dstPort, protocol, length, direction, processInfo)
+	StorePacketRecord(packetRecord)
+	logPacket(packetRecord)
+
 	// Create and store packet record
-	createAndStorePacket(deviceName, src, srcPort, dst, dstPort, protocol, length, direction, processInfo)
 }

@@ -1,6 +1,8 @@
 package util
 
 import (
+	"fmt"
+	"os"
 	"sync"
 
 	"golang.org/x/sys/windows"
@@ -47,4 +49,23 @@ func IsRunningAsAdmin() (bool, error) {
 	})
 
 	return isAdminProcess, adminCheckErr
+}
+
+
+func CheckNpcapInstallation() error {
+	// Common paths where wpcap.dll might be located
+	paths := []string{
+		"C:\\Windows\\System32\\Npcap\\wpcap.dll",
+		"C:\\Windows\\System32\\wpcap.dll",
+		"C:\\Windows\\SysWOW64\\Npcap\\wpcap.dll",
+		"C:\\Windows\\SysWOW64\\wpcap.dll",
+	}
+
+	for _, path := range paths {
+		if _, err := os.Stat(path); err == nil {
+			return nil
+		}
+	}
+
+	return fmt.Errorf("Npcap/WinPcap not found. Please install Npcap from https://npcap.com/#download")
 }

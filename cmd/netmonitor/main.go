@@ -9,7 +9,9 @@ import (
 	"syscall"
 	"time"
 
+	util "grip/internal"
 	"grip/internal/capture"
+	"grip/internal/database"
 	"grip/internal/logger"
 
 	"golang.org/x/sys/windows/svc"
@@ -49,9 +51,29 @@ func init() {
 
 type netmonitor struct{}
 
+func checkNpcapInstallation() {
+	err := util.CheckNpcapInstallation()
+	if err != nil {
+		logger.Error("an Error occured while checking Npcap installation: %v", err)
+		os.Exit(1)
+	}
+
+}
+
+func initDatabase() {
+	err := database.InitDatabase()
+	if err != nil {
+		logger.Error("an Error occured while initializing the database: %v", err)
+		os.Exit(1)
+	}
+}
+
 func (m *netmonitor) Execute(args []string, r <-chan svc.ChangeRequest, changes chan<- svc.Status) (ssec bool, errno uint32) {
 	const cmdsAccepted = svc.AcceptStop | svc.AcceptShutdown | svc.AcceptPauseAndContinue
 	changes <- svc.Status{State: svc.StartPending}
+
+	checkNpcapInstallation()
+	initDatabase()
 
 	// Configure logging
 	if err := configureLogging(); err != nil {
@@ -102,6 +124,9 @@ func main() {
 	if len(flag.Args()) < 1 {
 		usage("no command specified")
 	}
+
+	checkNpcapInstallation()
+	initDatabase()
 
 	// Initialize main logger before anything else
 	if err := initMainLogger(); err != nil {
