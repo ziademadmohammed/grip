@@ -2,6 +2,7 @@ package capture
 
 import (
 	"fmt"
+	util "grip/internal"
 	"log"
 	"net"
 	"os"
@@ -11,6 +12,9 @@ import (
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/pcap"
+
+	"grip/internal/database"
+	"grip/internal/process"
 )
 
 var (
@@ -38,18 +42,8 @@ func checkNpcapInstallation() error {
 }
 
 func StartCapture() error {
-	// Check admin privileges first
-	isAdmin, err := isRunningAsAdmin()
-	if err != nil {
-		return fmt.Errorf("failed to check administrator privileges: %v", err)
-	}
-
-	if !isAdmin {
-		LogDebug("ADMINISTRATOR PRIVILEGES REQUIRED: This application requires administrator privileges to function properly. Please run as administrator.")
-	}
-
 	// Initialize database
-	if err := InitDatabase(); err != nil {
+	if err := database.InitDatabase(); err != nil {
 		return fmt.Errorf("failed to initialize database: %v", err)
 	}
 
@@ -72,12 +66,12 @@ func StartCapture() error {
 
 	// Store network interfaces in database
 	for _, device := range devices {
-		iface := NetworkInterface{
+		iface := database.NetworkInterface{
 			Name:        device.Name,
 			Description: device.Description,
 			CreatedAt:   time.Now(),
 		}
-		if err := storeInterface(iface); err != nil {
+		if err := database.StoreInterface(iface); err != nil {
 			LogDebug("Error storing interface %s: %v", device.Name, err)
 		}
 		LogInterface(device.Name, device.Description)
@@ -137,9 +131,9 @@ func extractNetworkInfo(packet gopacket.Packet) (src, dst, srcPort, dstPort, pro
 }
 
 // Look up process information based on network connection details
-func lookupProcessInfo(protocol string, srcPortInt, dstPortInt uint16) (*ProcessInfo, error) {
+func lookupProcessInfo(protocol string, srcPortInt, dstPortInt uint16) (*process.ProcessInfo, error) {
 	// Check for admin requirement first
-	isAdmin, err := isRunningAsAdmin()
+	isAdmin, err := util.IsRunningAsAdmin()
 	if err != nil {
 		return nil, fmt.Errorf("failed to check admin status: %v", err)
 	}
@@ -148,33 +142,33 @@ func lookupProcessInfo(protocol string, srcPortInt, dstPortInt uint16) (*Process
 		return nil, fmt.Errorf("administrator privileges required for process lookups")
 	}
 
-	// We have admin rights, attempt process lookups
+	// We have admin rights, attempt process lookups/
 	if protocol == "TCP" {
-		if info, err := findTCPProcess(srcPortInt, dstPortInt, 0, 0); err == nil {
+		if info, err := process.FindTCPProcess(srcPortInt, dstPortInt, 0, 0); err == nil {
 			return info, nil
 		} else {
-			initialErr := fmt.Errorf("source TCP lookup failed: %v", err)
+			//initialErr := fmt.Errorf("source TCP lookup failed: %v", err)
 			LogDebug("Source TCP lookup failed: %v", err)
 
-			if info, err := findTCPProcess(dstPortInt, srcPortInt, 0, 0); err == nil {
+			if info, err := process.FindTCPProcess(dstPortInt, srcPortInt, 0, 0); err == nil {
 				return info, nil
 			} else {
 				LogDebug("Destination TCP lookup also failed: %v", err)
-				return nil, fmt.Errorf("both TCP lookups failed - source: %v, destination: %v", initialErr, err)
+				return nil, err
 			}
 		}
 	} else if protocol == "UDP" {
-		if info, err := findUDPProcess(srcPortInt, 0); err == nil {
+		if info, err := process.FindUDPProcess(srcPortInt, 0); err == nil {
 			return info, nil
 		} else {
-			initialErr := fmt.Errorf("source UDP lookup failed: %v", err)
+			//initialErr := fmt.Errorf("source UDP lookup failed: %v", err)
 			LogDebug("Source UDP lookup failed: %v", err)
 
-			if info, err := findUDPProcess(dstPortInt, 0); err == nil {
+			if info, err := process.FindUDPProcess(dstPortInt, 0); err == nil {
 				return info, nil
 			} else {
 				LogDebug("Destination UDP lookup also failed: %v", err)
-				return nil, fmt.Errorf("both UDP lookups failed - source: %v, destination: %v", initialErr, err)
+				return nil, err
 			}
 		}
 	}
@@ -183,12 +177,12 @@ func lookupProcessInfo(protocol string, srcPortInt, dstPortInt uint16) (*Process
 }
 
 // Create and store a packet record
-func createAndStorePacket(deviceName, src, srcPort, dst, dstPort, protocol string, length int, processInfo *ProcessInfo) {
+func createAndStorePacket(deviceName, src, srcPort, dst, dstPort, protocol string, length int, processInfo *process.ProcessInfo) {
 	// Determine packet direction
 	direction := determinePacketDirection(src, dst)
 
 	// Create packet record
-	record := PacketRecord{
+	record := database.PacketRecord{
 		Timestamp: time.Now(),
 		Device:    deviceName,
 		SrcIP:     src,
@@ -207,7 +201,7 @@ func createAndStorePacket(deviceName, src, srcPort, dst, dstPort, protocol strin
 	}
 
 	// Store in database
-	if err := storePacket(record); err != nil {
+	if err := database.StorePacket(record); err != nil {
 		LogDebug("Error storing packet in database: %v", err)
 	}
 
@@ -215,41 +209,9 @@ func createAndStorePacket(deviceName, src, srcPort, dst, dstPort, protocol strin
 	LogPacket(deviceName, src, srcPort, dst, dstPort, protocol, length, direction, processInfo)
 }
 
-func processPacket(deviceName string, packet gopacket.Packet) {
-	// Extract network information
-	src, dst, srcPort, dstPort, protocol, length, valid := extractNetworkInfo(packet)
-	if !valid {
-		return
-	}
-
-	// Update statistics
-	updateStats(uint64(length))
-	incrementProtocolCount(protocol)
-
-	// Parse port strings to integers for process lookup
-	srcPortInt := uint16(0)
-	dstPortInt := uint16(0)
-	if sp, err := strconv.ParseUint(srcPort, 10, 16); err == nil {
-		srcPortInt = uint16(sp)
-	}
-	if dp, err := strconv.ParseUint(dstPort, 10, 16); err == nil {
-		dstPortInt = uint16(dp)
-	}
-
-	// Look up process information
-	processInfo, err := lookupProcessInfo(protocol, srcPortInt, dstPortInt)
-	if err != nil {
-		LogDebug("Process lookup failed for %s:%s -> %s:%s (%s): %v",
-			src, srcPort, dst, dstPort, protocol, err)
-	}
-
-	// Create and store packet record
-	createAndStorePacket(deviceName, src, srcPort, dst, dstPort, protocol, length, processInfo)
-}
-
 func StopCapture() {
-	closeDatabase()
-	closeLogger()
+	database.CloseDatabase()
+	CloseLogger()
 }
 
 // Determine if an IP address is local to the machine
@@ -303,4 +265,36 @@ func determinePacketDirection(srcIP, dstIP string) string {
 	} else {
 		return "external" // Neither source nor destination is local - external traffic passing through
 	}
+}
+
+func processPacket(deviceName string, packet gopacket.Packet) {
+	// Extract network information
+	src, dst, srcPort, dstPort, protocol, length, valid := extractNetworkInfo(packet)
+	if !valid {
+		return
+	}
+
+	// Update statistics
+	updateStats(uint64(length))
+	incrementProtocolCount(protocol)
+
+	// Parse port strings to integers for process lookup
+	srcPortInt := uint16(0)
+	dstPortInt := uint16(0)
+	if sp, err := strconv.ParseUint(srcPort, 10, 16); err == nil {
+		srcPortInt = uint16(sp)
+	}
+	if dp, err := strconv.ParseUint(dstPort, 10, 16); err == nil {
+		dstPortInt = uint16(dp)
+	}
+
+	// Look up process information
+	processInfo, err := lookupProcessInfo(protocol, srcPortInt, dstPortInt)
+	if err != nil {
+		LogDebug("Process lookup failed for %s:%s -> %s:%s (%s): %v",
+			src, srcPort, dst, dstPort, protocol, err)
+	}
+
+	// Create and store packet record
+	createAndStorePacket(deviceName, src, srcPort, dst, dstPort, protocol, length, processInfo)
 }

@@ -1,13 +1,11 @@
 package capture
 
 import (
-	"encoding/json"
-	"fmt"
-	"log"
 	"os"
-	"path/filepath"
-	"sync/atomic"
 	"time"
+
+	"grip/internal/logger"
+	"grip/internal/process"
 )
 
 type PacketLog struct {
@@ -19,83 +17,51 @@ type PacketLog struct {
 	DstPort     string    `json:"dst_port"`
 	Protocol    string    `json:"protocol"`
 	Length      int       `json:"length"`
+	Direction   string    `json:"direction"`
 	ProcessID   uint32    `json:"process_id,omitempty"`
 	ProcessName string    `json:"process_name,omitempty"`
 	ProcessPath string    `json:"process_path,omitempty"`
 }
 
 var (
-	logFile *os.File
-	logDir  = "logs"
-
-	// Feature flags for different types of logging
-	packetLoggingEnabled    atomic.Bool
-	interfaceLoggingEnabled atomic.Bool
-	debugLoggingEnabled     atomic.Bool
+	jsonLogFile *os.File
+	jsonLogDir  = "logs"
 )
 
-// LogConfig holds the configuration for different types of logging
-type LogConfig struct {
-	EnablePacketLogs    bool
-	EnableInterfaceLogs bool
-	EnableDebugLogs     bool
-}
-
-// ConfigureLogging sets up the logging configuration
-func ConfigureLogging(config LogConfig) {
-	packetLoggingEnabled.Store(config.EnablePacketLogs)
-	interfaceLoggingEnabled.Store(config.EnableInterfaceLogs)
-	debugLoggingEnabled.Store(config.EnableDebugLogs)
-}
-
-func initLogger() error {
-	// Create logs directory if it doesn't exist
-	if err := os.MkdirAll(logDir, 0755); err != nil {
-		return fmt.Errorf("failed to create log directory: %v", err)
+// InitializeLogger sets up logging for the capture package
+func InitializeLogger(config logger.LoggerConfig) error {
+	// Initialize the core logger
+	if err := logger.Initialize(config); err != nil {
+		return err
 	}
 
-	// Create a new log file for this session
-	timestamp := time.Now().Format("2006-01-02_15-04-05")
-	logPath := filepath.Join(logDir, fmt.Sprintf("network_traffic_%s.log", timestamp))
-
-	file, err := os.Create(logPath)
-	if err != nil {
-		return fmt.Errorf("failed to create log file: %v", err)
+	// If we need to log to JSON files, set that up here
+	if config.EnableFile {
+		// Setup could go here if needed
 	}
 
-	logFile = file
 	return nil
 }
 
-func closeLogger() {
-	if logFile != nil {
-		logFile.Close()
-	}
-}
+// CloseLogger closes any open log files
+func CloseLogger() {
+	logger.Close()
 
-func logToFile(entry PacketLog) {
-	if logFile == nil {
-		return
+	if jsonLogFile != nil {
+		jsonLogFile.Close()
+		jsonLogFile = nil
 	}
-
-	data, err := json.Marshal(entry)
-	if err != nil {
-		fmt.Printf("Error marshaling packet log: %v\n", err)
-		return
-	}
-
-	logFile.Write(data)
-	logFile.Write([]byte("\n"))
 }
 
 // LogPacket handles packet logging with process information
-func LogPacket(deviceName string, src, srcPort, dst, dstPort, protocol string, length int, direction string, procInfo *ProcessInfo) {
-	if !packetLoggingEnabled.Load() {
+func LogPacket(deviceName string, src, srcPort, dst, dstPort, protocol string, length int, direction string, procInfo *process.ProcessInfo) {
+	// Skip if info logging is disabled
+	if !logger.IsInfoEnabled() {
 		return
 	}
 
 	if procInfo != nil {
-		log.Printf("[%s] %s:%s -> %s:%s, Protocol: %s, Length: %d bytes, Direction: %s, Process: %s (%d) [%s]",
+		logger.Info("[%s] %s:%s -> %s:%s, Protocol: %s, Length: %d bytes, Direction: %s, Process: %s (%d) [%s]",
 			deviceName,
 			src, srcPort,
 			dst, dstPort,
@@ -107,7 +73,7 @@ func LogPacket(deviceName string, src, srcPort, dst, dstPort, protocol string, l
 			procInfo.ExecutablePath,
 		)
 	} else {
-		log.Printf("[%s] %s:%s -> %s:%s, Protocol: %s, Length: %d bytes, Direction: %s",
+		logger.Info("[%s] %s:%s -> %s:%s, Protocol: %s, Length: %d bytes, Direction: %s",
 			deviceName,
 			src, srcPort,
 			dst, dstPort,
@@ -116,35 +82,34 @@ func LogPacket(deviceName string, src, srcPort, dst, dstPort, protocol string, l
 			direction,
 		)
 	}
+
+	// JSON packet logging could be added here if needed
 }
 
 // LogInterface logs information about network interfaces
 func LogInterface(name, description string) {
-	if !interfaceLoggingEnabled.Load() {
+	if !logger.IsInfoEnabled() {
 		return
 	}
-	log.Printf("Found interface: %s (%s)", name, description)
+	logger.Info("Found interface: %s (%s)", name, description)
 }
 
 // LogDebug logs debug information
 func LogDebug(format string, v ...interface{}) {
-	if !debugLoggingEnabled.Load() {
-		return
-	}
-	log.Printf(format, v...)
+	logger.Debug(format, v...)
 }
 
-// IsPacketLoggingEnabled returns the current state of packet logging
-func IsPacketLoggingEnabled() bool {
-	return packetLoggingEnabled.Load()
+// LogInfo logs information
+func LogInfo(format string, v ...interface{}) {
+	logger.Info(format, v...)
 }
 
-// IsInterfaceLoggingEnabled returns the current state of interface logging
-func IsInterfaceLoggingEnabled() bool {
-	return interfaceLoggingEnabled.Load()
+// LogError logs error information
+func LogError(format string, v ...interface{}) {
+	logger.Error(format, v...)
 }
 
-// IsDebugLoggingEnabled returns the current state of debug logging
-func IsDebugLoggingEnabled() bool {
-	return debugLoggingEnabled.Load()
+// LogWarning logs warning information
+func LogWarning(format string, v ...interface{}) {
+	logger.Warning(format, v...)
 }

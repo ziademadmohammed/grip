@@ -1,4 +1,4 @@
-package capture
+package database
 
 import (
 	"database/sql"
@@ -74,6 +74,11 @@ func InitDatabase() error {
 		return fmt.Errorf("error creating tables: %v", err)
 	}
 
+	// Perform database migrations if needed
+	if err := migrateDatabase(); err != nil {
+		return fmt.Errorf("error migrating database: %v", err)
+	}
+
 	log.Printf("Database initialized at: %s", dbPath)
 	return nil
 }
@@ -131,7 +136,31 @@ func createTables() error {
 	return nil
 }
 
-func storeInterface(iface NetworkInterface) error {
+func migrateDatabase() error {
+	// Check if direction column exists
+	var count int
+	err := db.QueryRow(`
+		SELECT COUNT(*) FROM pragma_table_info('packet_logs') 
+		WHERE name = 'direction'
+	`).Scan(&count)
+
+	if err != nil {
+		return fmt.Errorf("error checking for direction column: %v", err)
+	}
+
+	// Add the direction column if it doesn't exist
+	if count == 0 {
+		log.Printf("Adding direction column to packet_logs table")
+		_, err := db.Exec(`ALTER TABLE packet_logs ADD COLUMN direction TEXT`)
+		if err != nil {
+			return fmt.Errorf("error adding direction column: %v", err)
+		}
+	}
+
+	return nil
+}
+
+func StoreInterface(iface NetworkInterface) error {
 	// Check if interface already exists
 	var exists bool
 	err := db.QueryRow(`
@@ -146,7 +175,7 @@ func storeInterface(iface NetworkInterface) error {
 	}
 
 	if exists {
-		LogDebug("Interface already exists: %s (%s)", iface.Name, iface.Description)
+		log.Printf("Interface already exists: %s (%s)", iface.Name, iface.Description)
 		return nil
 	}
 
@@ -160,11 +189,11 @@ func storeInterface(iface NetworkInterface) error {
 		return fmt.Errorf("error storing interface: %v", err)
 	}
 
-	LogDebug("Added new interface: %s (%s)", iface.Name, iface.Description)
+	log.Printf("Added new interface: %s (%s)", iface.Name, iface.Description)
 	return nil
 }
 
-func storePacket(packet PacketRecord) error {
+func StorePacket(packet PacketRecord) error {
 	_, err := db.Exec(`
 		INSERT INTO packet_logs (
 			timestamp, device, src_ip, src_port, dst_ip, dst_port,
@@ -191,7 +220,7 @@ func storePacket(packet PacketRecord) error {
 	return err
 }
 
-func closeDatabase() {
+func CloseDatabase() {
 	if db != nil {
 		db.Close()
 	}

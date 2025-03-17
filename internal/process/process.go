@@ -1,8 +1,8 @@
-package capture
+package process
 
 import (
 	"fmt"
-	"sync"
+	util "grip/internal"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -12,11 +12,14 @@ var (
 	modIPHlpAPI             = windows.NewLazySystemDLL("iphlpapi.dll")
 	procGetExtendedTcpTable = modIPHlpAPI.NewProc("GetExtendedTcpTable")
 	procGetExtendedUdpTable = modIPHlpAPI.NewProc("GetExtendedUdpTable")
+)
 
-	// Cache for admin check to avoid repeated checks
-	adminCheckOnce sync.Once
-	isAdminProcess bool
-	adminCheckErr  error
+// Windows API constants for TCP/UDP table operations
+const (
+	AF_INET                 = 2
+	TCP_TABLE_OWNER_PID_ALL = 5
+	UDP_TABLE_OWNER_PID     = 1
+	SORT_BY_PID             = 1
 )
 
 type ProcessInfo struct {
@@ -40,7 +43,7 @@ type UDPRow struct {
 	ProcessID uint32
 }
 
-func getProcessDetails(pid uint32) (*ProcessInfo, error) {
+func GetProcessDetails(pid uint32) (*ProcessInfo, error) {
 	handle, err := windows.OpenProcess(windows.PROCESS_QUERY_INFORMATION|windows.PROCESS_VM_READ, false, pid)
 	if err != nil {
 		return nil, fmt.Errorf("OpenProcess failed: %v", err)
@@ -62,9 +65,9 @@ func getProcessDetails(pid uint32) (*ProcessInfo, error) {
 	return info, nil
 }
 
-func findTCPProcess(localPort uint16, remotePort uint16, localAddr, remoteAddr uint32) (*ProcessInfo, error) {
+func FindTCPProcess(localPort uint16, remotePort uint16, localAddr, remoteAddr uint32) (*ProcessInfo, error) {
 	// Check if running as administrator
-	isAdmin, err := isRunningAsAdmin()
+	isAdmin, err := util.IsRunningAsAdmin()
 	if err != nil {
 		return nil, fmt.Errorf("failed to check admin status: %v", err)
 	}
@@ -84,9 +87,9 @@ func findTCPProcess(localPort uint16, remotePort uint16, localAddr, remoteAddr u
 		ret, _, errCall := procGetExtendedTcpTable.Call(
 			uintptr(unsafe.Pointer(&table[0])),
 			uintptr(unsafe.Pointer(&size)),
-			1, // Sort by PID
-			0, // AF_INET
-			5, // TCP_TABLE_OWNER_PID_ALL
+			SORT_BY_PID,
+			AF_INET,
+			TCP_TABLE_OWNER_PID_ALL,
 			0,
 		)
 
@@ -128,14 +131,15 @@ func findTCPProcess(localPort uint16, remotePort uint16, localAddr, remoteAddr u
 		for i := uint32(0); i < count; i++ {
 			row := rows[i]
 
-			LogDebug("TCP Connection - Local: %d, Remote: %d, PID: %d",
+			// Changed from LogDebug to fmt.Printf as the logger isn't available here
+			fmt.Printf("TCP Connection - Local: %d, Remote: %d, PID: %d\n",
 				row.LocalPort, row.RemotePort, row.ProcessID)
 
 			if row.LocalPort == uint32(localPortN) &&
 				(remotePort == 0 || row.RemotePort == uint32(remotePortN)) &&
 				(localAddr == 0 || row.LocalAddr == localAddr) &&
 				(remoteAddr == 0 || row.RemoteAddr == remoteAddr) {
-				return getProcessDetails(row.ProcessID)
+				return GetProcessDetails(row.ProcessID)
 			}
 		}
 
@@ -147,45 +151,9 @@ func findTCPProcess(localPort uint16, remotePort uint16, localAddr, remoteAddr u
 	return nil, lastErr
 }
 
-// isRunningAsAdmin checks if the process has administrator privileges
-// This is now cached after the first call
-func isRunningAsAdmin() (bool, error) {
-	// Only perform the check once and cache the result
-	adminCheckOnce.Do(func() {
-		var sid *windows.SID
-
-		// Create a SID for the administrators group
-		err := windows.AllocateAndInitializeSid(
-			&windows.SECURITY_NT_AUTHORITY,
-			2,
-			windows.SECURITY_BUILTIN_DOMAIN_RID,
-			windows.DOMAIN_ALIAS_RID_ADMINS,
-			0, 0, 0, 0, 0, 0,
-			&sid)
-		if err != nil {
-			adminCheckErr = err
-			return
-		}
-		defer windows.FreeSid(sid)
-
-		// Check if the current process token is a member of that SID
-		token := windows.Token(0)
-		member, err := token.IsMember(sid)
-		if err != nil {
-			adminCheckErr = err
-			return
-		}
-
-		isAdminProcess = member
-		LogDebug("Admin privileges check: %v", isAdminProcess)
-	})
-
-	return isAdminProcess, adminCheckErr
-}
-
-func findUDPProcess(localPort uint16, localAddr uint32) (*ProcessInfo, error) {
+func FindUDPProcess(localPort uint16, localAddr uint32) (*ProcessInfo, error) {
 	// Check if running as administrator
-	isAdmin, err := isRunningAsAdmin()
+	isAdmin, err := util.IsRunningAsAdmin()
 	if err != nil {
 		return nil, fmt.Errorf("failed to check admin status: %v", err)
 	}
@@ -205,9 +173,9 @@ func findUDPProcess(localPort uint16, localAddr uint32) (*ProcessInfo, error) {
 		ret, _, errCall := procGetExtendedUdpTable.Call(
 			uintptr(unsafe.Pointer(&table[0])),
 			uintptr(unsafe.Pointer(&size)),
-			1, // Sort by PID
-			0, // AF_INET
-			1, // UDP_TABLE_OWNER_PID
+			SORT_BY_PID,
+			AF_INET,
+			UDP_TABLE_OWNER_PID,
 			0,
 		)
 
@@ -248,12 +216,13 @@ func findUDPProcess(localPort uint16, localAddr uint32) (*ProcessInfo, error) {
 		for i := uint32(0); i < count; i++ {
 			row := rows[i]
 
-			LogDebug("UDP Connection - Local: %d, PID: %d",
+			// Changed from LogDebug to fmt.Printf as the logger isn't available here
+			fmt.Printf("UDP Connection - Local: %d, PID: %d\n",
 				row.LocalPort, row.ProcessID)
 
 			if row.LocalPort == uint32(localPortN) &&
 				(localAddr == 0 || row.LocalAddr == localAddr) {
-				return getProcessDetails(row.ProcessID)
+				return GetProcessDetails(row.ProcessID)
 			}
 		}
 

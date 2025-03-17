@@ -8,7 +8,9 @@ import (
 	"strings"
 	"time"
 
+	util "grip/internal"
 	"grip/internal/capture"
+	"grip/internal/logger"
 
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/debug"
@@ -18,25 +20,57 @@ import (
 
 var (
 	svcName = "NetMonitor"
-	// Logging flags
-	enablePacketLogs    bool
-	enableInterfaceLogs bool
-	enableDebugLogs     bool
+
+	// Log levels
+	enableError   bool
+	enableWarning bool
+	enableInfo    bool
+	enableDebug   bool
+	enableTrace   bool
+
+	// Log destinations
+	enableConsole bool
+	enableFile    bool
+	logFilePath   string
+	useColors     bool
 )
 
 func init() {
-	// Add logging flags
-	flag.BoolVar(&enablePacketLogs, "packet-logs", false, "Enable packet logging")
-	flag.BoolVar(&enableInterfaceLogs, "interface-logs", false, "Enable network interface logging")
-	flag.BoolVar(&enableDebugLogs, "debug-logs", true, "Enable debug logging")
+	// Log level flags
+	flag.BoolVar(&enableError, "log-error", true, "Enable error logging")
+	flag.BoolVar(&enableWarning, "log-warning", true, "Enable warning logging")
+	flag.BoolVar(&enableInfo, "log-info", true, "Enable info logging")
+	flag.BoolVar(&enableDebug, "log-debug", false, "Enable debug logging")
+	flag.BoolVar(&enableTrace, "log-trace", false, "Enable trace logging")
+
+	// Log destination flags
+	flag.BoolVar(&enableConsole, "log-console", true, "Enable console logging")
+	flag.BoolVar(&enableFile, "log-file", false, "Enable file logging")
+	flag.StringVar(&logFilePath, "log-path", "logs/netmonitor.log", "Path to log file (if file logging enabled)")
+	flag.BoolVar(&useColors, "log-colors", true, "Use colors in console output")
 }
 
-func configureLogging() {
-	capture.ConfigureLogging(capture.LogConfig{
-		EnablePacketLogs:    enablePacketLogs,
-		EnableInterfaceLogs: enableInterfaceLogs,
-		EnableDebugLogs:     enableDebugLogs,
-	})
+func configureLogging() error {
+	// Validate logging configuration
+	if enableFile && logFilePath == "" {
+		return fmt.Errorf("log file path must be specified when file logging is enabled")
+	}
+
+	// Create logger configuration
+	config := logger.LoggerConfig{
+		EnableError:   enableError,
+		EnableWarning: enableWarning,
+		EnableInfo:    enableInfo,
+		EnableDebug:   enableDebug,
+		EnableTrace:   enableTrace,
+		EnableConsole: enableConsole,
+		EnableFile:    enableFile,
+		LogFilePath:   logFilePath,
+		UseColors:     useColors,
+	}
+
+	// Initialize the capture package logger
+	return capture.InitializeLogger(config)
 }
 
 func usage(errmsg string) {
@@ -55,7 +89,10 @@ func (m *netmonitor) Execute(args []string, r <-chan svc.ChangeRequest, changes 
 	changes <- svc.Status{State: svc.StartPending}
 
 	// Configure logging
-	configureLogging()
+	if err := configureLogging(); err != nil {
+		log.Printf("Failed to configure logging: %v", err)
+		return true, 1
+	}
 
 	// Start packet capture
 	if err := capture.StartCapture(); err != nil {
@@ -98,22 +135,22 @@ func printStatistics() {
 	stats := capture.GetStatistics()
 	uptime := time.Since(stats.StartTime)
 
-	log.Printf("=== Network Statistics ===")
-	log.Printf("Uptime: %v", uptime.Round(time.Second))
-	log.Printf("Total Packets: %d", stats.TotalPackets.Load())
-	log.Printf("Total Bytes: %d", stats.TotalBytes.Load())
-	log.Printf("Packets/Second: %.2f", float64(stats.TotalPackets.Load())/uptime.Seconds())
-	log.Printf("Bytes/Second: %.2f", float64(stats.TotalBytes.Load())/uptime.Seconds())
+	capture.LogInfo("=== Network Statistics ===")
+	capture.LogInfo("Uptime: %v", uptime.Round(time.Second))
+	capture.LogInfo("Total Packets: %d", stats.TotalPackets.Load())
+	capture.LogInfo("Total Bytes: %d", stats.TotalBytes.Load())
+	capture.LogInfo("Packets/Second: %.2f", float64(stats.TotalPackets.Load())/uptime.Seconds())
+	capture.LogInfo("Bytes/Second: %.2f", float64(stats.TotalBytes.Load())/uptime.Seconds())
 
-	log.Printf("Protocol Distribution:")
+	capture.LogInfo("Protocol Distribution:")
 	stats.PacketsByProtocol.Range(func(key, value interface{}) bool {
 		protocol := key.(string)
 		count := value.(uint64)
 		percentage := float64(count) / float64(stats.TotalPackets.Load()) * 100
-		log.Printf("  %s: %d (%.1f%%)", protocol, count, percentage)
+		capture.LogInfo("  %s: %d (%.1f%%)", protocol, count, percentage)
 		return true
 	})
-	log.Printf("=====================")
+	capture.LogInfo("=====================")
 }
 
 func runService(isDebug bool) {
@@ -198,11 +235,23 @@ func main() {
 		usage("no command specified")
 	}
 
+	// Check admin privileges first - do this before any other operations
+	isAdmin, err := util.IsRunningAsAdmin()
+	if err != nil {
+		log.Fatalf("Failed to check administrator privileges: %v", err)
+	}
+
+	if !isAdmin {
+		log.Fatalf("ADMINISTRATOR PRIVILEGES REQUIRED: This application requires administrator privileges to function properly. Please run as administrator.")
+	}
+
 	cmd := strings.ToLower(flag.Args()[0])
 	switch cmd {
 	case "debug":
 		log.Printf("Starting in debug mode")
-		configureLogging()
+		if err := configureLogging(); err != nil {
+			log.Fatalf("Failed to configure logging: %v", err)
+		}
 		if err := capture.StartCapture(); err != nil {
 			log.Fatal(err)
 		}
