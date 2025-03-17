@@ -2,7 +2,6 @@ package process
 
 import (
 	"fmt"
-	util "grip/internal"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -66,16 +65,6 @@ func GetProcessDetails(pid uint32) (*ProcessInfo, error) {
 }
 
 func FindTCPProcess(localPort uint16, remotePort uint16, localAddr, remoteAddr uint32) (*ProcessInfo, error) {
-	// Check if running as administrator
-	isAdmin, err := util.IsRunningAsAdmin()
-	if err != nil {
-		return nil, fmt.Errorf("failed to check admin status: %v", err)
-	}
-
-	if !isAdmin {
-		return nil, fmt.Errorf("administrator privileges required for process lookups")
-	}
-
 	var size uint32 = 8192 // Start with a reasonable buffer size
 	var table []byte
 	var lastErr error
@@ -131,10 +120,6 @@ func FindTCPProcess(localPort uint16, remotePort uint16, localAddr, remoteAddr u
 		for i := uint32(0); i < count; i++ {
 			row := rows[i]
 
-			// Changed from LogDebug to fmt.Printf as the logger isn't available here
-			fmt.Printf("TCP Connection - Local: %d, Remote: %d, PID: %d\n",
-				row.LocalPort, row.RemotePort, row.ProcessID)
-
 			if row.LocalPort == uint32(localPortN) &&
 				(remotePort == 0 || row.RemotePort == uint32(remotePortN)) &&
 				(localAddr == 0 || row.LocalAddr == localAddr) &&
@@ -152,16 +137,6 @@ func FindTCPProcess(localPort uint16, remotePort uint16, localAddr, remoteAddr u
 }
 
 func FindUDPProcess(localPort uint16, localAddr uint32) (*ProcessInfo, error) {
-	// Check if running as administrator
-	isAdmin, err := util.IsRunningAsAdmin()
-	if err != nil {
-		return nil, fmt.Errorf("failed to check admin status: %v", err)
-	}
-
-	if !isAdmin {
-		return nil, fmt.Errorf("administrator privileges required for process lookups")
-	}
-
 	var size uint32 = 8192 // Start with a reasonable buffer size
 	var table []byte
 	var lastErr error
@@ -215,10 +190,6 @@ func FindUDPProcess(localPort uint16, localAddr uint32) (*ProcessInfo, error) {
 
 		for i := uint32(0); i < count; i++ {
 			row := rows[i]
-
-			// Changed from LogDebug to fmt.Printf as the logger isn't available here
-			fmt.Printf("UDP Connection - Local: %d, PID: %d\n",
-				row.LocalPort, row.ProcessID)
 
 			if row.LocalPort == uint32(localPortN) &&
 				(localAddr == 0 || row.LocalAddr == localAddr) {

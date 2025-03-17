@@ -23,7 +23,7 @@ type NetworkInterface struct {
 type PacketRecord struct {
 	ID          int64
 	Timestamp   time.Time
-	Device      string
+	DeviceID    int64
 	SrcIP       string
 	SrcPort     string
 	DstIP       string
@@ -34,6 +34,20 @@ type PacketRecord struct {
 	ProcessName string
 	ProcessPath string
 	Direction   string // "incoming", "outgoing", "internal", or "external"
+}
+
+// ApplicationStats represents statistics for a specific application
+type ApplicationStats struct {
+	ID           int64
+	ProcessID    uint32
+	ProcessName  string
+	ProcessPath  string
+	TotalPackets uint64
+	TotalBytes   uint64
+	LastUpdated  time.Time
+	Destinations string // JSON array of destinations
+	FirstSeen    time.Time
+	LastSeen     time.Time
 }
 
 func getDefaultDBPath() (string, error) {
@@ -103,7 +117,7 @@ func createTables() error {
 		CREATE TABLE IF NOT EXISTS packet_logs (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-			device TEXT NOT NULL,
+			device_id INTEGER NOT NULL, 
 			src_ip TEXT NOT NULL,
 			src_port TEXT NOT NULL,
 			dst_ip TEXT NOT NULL,
@@ -113,7 +127,8 @@ func createTables() error {
 			process_id INTEGER,
 			process_name TEXT,
 			process_path TEXT,
-			direction TEXT
+			direction TEXT,
+			FOREIGN KEY (device_id) REFERENCES network_interfaces (id)
 		)
 	`)
 	if err != nil {
@@ -125,12 +140,18 @@ func createTables() error {
 		`CREATE INDEX IF NOT EXISTS idx_timestamp ON packet_logs(timestamp)`,
 		`CREATE INDEX IF NOT EXISTS idx_protocol ON packet_logs(protocol)`,
 		`CREATE INDEX IF NOT EXISTS idx_process_name ON packet_logs(process_name)`,
+		`CREATE INDEX IF NOT EXISTS idx_device_id ON packet_logs(device_id)`,
 	}
 
 	for _, idx := range indexes {
 		if _, err := db.Exec(idx); err != nil {
 			return fmt.Errorf("error creating index: %v", err)
 		}
+	}
+
+	// Create application statistics tables
+	if err := createAppStatsTables(); err != nil {
+		return fmt.Errorf("error creating application stats tables: %v", err)
 	}
 
 	return nil
@@ -157,12 +178,102 @@ func migrateDatabase() error {
 		}
 	}
 
+	// Check if we need to migrate from device to device_id
+	err = db.QueryRow(`
+		SELECT COUNT(*) FROM pragma_table_info('packet_logs') 
+		WHERE name = 'device'
+	`).Scan(&count)
+
+	if err != nil {
+		return fmt.Errorf("error checking for device column: %v", err)
+	}
+
+	// If device column exists, we need to migrate to device_id
+	if count > 0 {
+		log.Printf("Migrating from device to device_id in packet_logs table")
+
+		// First, add the device_id column if it doesn't exist
+		_, err = db.Exec(`ALTER TABLE packet_logs ADD COLUMN device_id INTEGER`)
+		if err != nil {
+			return fmt.Errorf("error adding device_id column: %v", err)
+		}
+
+		// Create a temporary table for migration
+		_, err = db.Exec(`
+			CREATE TABLE IF NOT EXISTS packet_logs_new (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+				device_id INTEGER NOT NULL,
+				src_ip TEXT NOT NULL,
+				src_port TEXT NOT NULL,
+				dst_ip TEXT NOT NULL,
+				dst_port TEXT NOT NULL,
+				protocol TEXT NOT NULL,
+				length INTEGER NOT NULL,
+				process_id INTEGER,
+				process_name TEXT,
+				process_path TEXT,
+				direction TEXT,
+				FOREIGN KEY (device_id) REFERENCES network_interfaces (id)
+			)
+		`)
+		if err != nil {
+			return fmt.Errorf("error creating new packet_logs table: %v", err)
+		}
+
+		// Move data to the new table, ignoring records that can't be migrated
+		_, err = db.Exec(`
+			INSERT INTO packet_logs_new (
+				timestamp, device_id, src_ip, src_port, dst_ip, dst_port,
+				protocol, length, process_id, process_name, process_path, direction
+			)
+			SELECT 
+				p.timestamp, 
+				COALESCE(n.id, 0) AS device_id, 
+				p.src_ip, p.src_port, p.dst_ip, p.dst_port,
+				p.protocol, p.length, p.process_id, p.process_name, p.process_path, p.direction
+			FROM packet_logs p
+			LEFT JOIN network_interfaces n ON p.device = n.name
+		`)
+		if err != nil {
+			return fmt.Errorf("error migrating data to new table: %v", err)
+		}
+
+		// Replace old table with new one
+		_, err = db.Exec(`DROP TABLE packet_logs`)
+		if err != nil {
+			return fmt.Errorf("error dropping old table: %v", err)
+		}
+
+		_, err = db.Exec(`ALTER TABLE packet_logs_new RENAME TO packet_logs`)
+		if err != nil {
+			return fmt.Errorf("error renaming new table: %v", err)
+		}
+
+		// Recreate indexes
+		indexes := []string{
+			`CREATE INDEX IF NOT EXISTS idx_timestamp ON packet_logs(timestamp)`,
+			`CREATE INDEX IF NOT EXISTS idx_protocol ON packet_logs(protocol)`,
+			`CREATE INDEX IF NOT EXISTS idx_process_name ON packet_logs(process_name)`,
+			`CREATE INDEX IF NOT EXISTS idx_device_id ON packet_logs(device_id)`,
+		}
+
+		for _, idx := range indexes {
+			if _, err := db.Exec(idx); err != nil {
+				return fmt.Errorf("error recreating index: %v", err)
+			}
+		}
+
+		log.Printf("Migration from device to device_id completed")
+	}
+
 	return nil
 }
 
-func StoreInterface(iface NetworkInterface) error {
+func StoreInterface(iface NetworkInterface) (int64, error) {
 	// Check if interface already exists
 	var exists bool
+	var id int64
 	err := db.QueryRow(`
 		SELECT EXISTS(
 			SELECT 1 FROM network_interfaces 
@@ -171,37 +282,51 @@ func StoreInterface(iface NetworkInterface) error {
 	`, iface.Name, iface.Description).Scan(&exists)
 
 	if err != nil {
-		return fmt.Errorf("error checking interface existence: %v", err)
+		return 0, fmt.Errorf("error checking interface existence: %v", err)
 	}
 
 	if exists {
-		log.Printf("Interface already exists: %s (%s)", iface.Name, iface.Description)
-		return nil
+		// Get the ID of the existing interface
+		err = db.QueryRow(`
+			SELECT id FROM network_interfaces
+			WHERE name = ? AND description = ?
+		`, iface.Name, iface.Description).Scan(&id)
+		if err != nil {
+			return 0, fmt.Errorf("error getting interface ID: %v", err)
+		}
+		log.Printf("Interface already exists: %s (%s), ID: %d", iface.Name, iface.Description, id)
+		return id, nil
 	}
 
 	// Insert new interface
-	_, err = db.Exec(`
+	result, err := db.Exec(`
 		INSERT INTO network_interfaces (name, description)
 		VALUES (?, ?)
 	`, iface.Name, iface.Description)
 
 	if err != nil {
-		return fmt.Errorf("error storing interface: %v", err)
+		return 0, fmt.Errorf("error storing interface: %v", err)
 	}
 
-	log.Printf("Added new interface: %s (%s)", iface.Name, iface.Description)
-	return nil
+	// Get the ID of the inserted interface
+	id, err = result.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("error getting last insert ID: %v", err)
+	}
+
+	log.Printf("Added new interface: %s (%s), ID: %d", iface.Name, iface.Description, id)
+	return id, nil
 }
 
 func StorePacket(packet PacketRecord) error {
 	_, err := db.Exec(`
 		INSERT INTO packet_logs (
-			timestamp, device, src_ip, src_port, dst_ip, dst_port,
+			timestamp, device_id, src_ip, src_port, dst_ip, dst_port,
 			protocol, length, process_id, process_name, process_path, direction
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		packet.Timestamp,
-		packet.Device,
+		packet.DeviceID,
 		packet.SrcIP,
 		packet.SrcPort,
 		packet.DstIP,
@@ -224,4 +349,161 @@ func CloseDatabase() {
 	if db != nil {
 		db.Close()
 	}
+}
+
+// Initialize application statistics tables
+func createAppStatsTables() error {
+	// Create application_stats table
+	_, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS application_stats (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			process_id INTEGER NOT NULL,
+			process_name TEXT NOT NULL,
+			process_path TEXT,
+			total_packets INTEGER NOT NULL DEFAULT 0,
+			total_bytes INTEGER NOT NULL DEFAULT 0,
+			last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			destinations TEXT, -- JSON array
+			first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(process_name, process_id)
+		)
+	`)
+	if err != nil {
+		return err
+	}
+
+	// Create protocol_stats table for per-application protocol statistics
+	_, err = db.Exec(`
+		CREATE TABLE IF NOT EXISTS protocol_stats (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			app_stats_id INTEGER NOT NULL,
+			protocol TEXT NOT NULL,
+			packet_count INTEGER NOT NULL DEFAULT 0,
+			UNIQUE(app_stats_id, protocol),
+			FOREIGN KEY (app_stats_id) REFERENCES application_stats(id)
+		)
+	`)
+	if err != nil {
+		return err
+	}
+
+	// Create indexes
+	indexes := []string{
+		`CREATE INDEX IF NOT EXISTS idx_app_stats_process_name ON application_stats(process_name)`,
+		`CREATE INDEX IF NOT EXISTS idx_app_stats_process_id ON application_stats(process_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_protocol_stats_app_id ON protocol_stats(app_stats_id)`,
+	}
+
+	for _, idx := range indexes {
+		if _, err := db.Exec(idx); err != nil {
+			return fmt.Errorf("error creating index: %v", err)
+		}
+	}
+
+	return nil
+}
+
+// IsInitialized returns whether the database is initialized
+func IsInitialized() bool {
+	return db != nil
+}
+
+// StoreAppStats stores or updates application statistics in the database
+func StoreAppStats(stats *ApplicationStats) error {
+	if db == nil {
+		return fmt.Errorf("database not initialized")
+	}
+
+	// First try to update existing record
+	result, err := db.Exec(`
+		UPDATE application_stats SET
+			total_packets = ?,
+			total_bytes = ?,
+			last_updated = ?,
+			destinations = ?,
+			last_seen = ?,
+			process_path = COALESCE(?, process_path)
+		WHERE process_name = ? AND process_id = ?
+	`,
+		stats.TotalPackets,
+		stats.TotalBytes,
+		time.Now(),
+		stats.Destinations,
+		time.Now(),
+		stats.ProcessPath,
+		stats.ProcessName,
+		stats.ProcessID,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to update app stats: %v", err)
+	}
+
+	// Check if the update affected any rows
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to check rows affected: %v", err)
+	}
+
+	// If no rows were updated, insert a new record
+	if rowsAffected == 0 {
+		result, err = db.Exec(`
+			INSERT INTO application_stats (
+				process_id, process_name, process_path, 
+				total_packets, total_bytes, 
+				last_updated, destinations, 
+				first_seen, last_seen
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`,
+			stats.ProcessID,
+			stats.ProcessName,
+			stats.ProcessPath,
+			stats.TotalPackets,
+			stats.TotalBytes,
+			time.Now(),
+			stats.Destinations,
+			time.Now(),
+			time.Now(),
+		)
+		if err != nil {
+			return fmt.Errorf("failed to insert app stats: %v", err)
+		}
+	}
+
+	return nil
+}
+
+// StoreProtocolStats stores protocol statistics for an application
+func StoreProtocolStats(appName string, processID uint32, protocol string, packetCount uint64) error {
+	if db == nil {
+		return fmt.Errorf("database not initialized")
+	}
+
+	// First get the app_stats_id
+	var appStatsID int64
+	err := db.QueryRow(`
+		SELECT id FROM application_stats 
+		WHERE process_name = ? AND process_id = ?
+	`, appName, processID).Scan(&appStatsID)
+
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return fmt.Errorf("application stats not found for %s (PID %d)", appName, processID)
+		}
+		return fmt.Errorf("error getting app stats ID: %v", err)
+	}
+
+	// Now update the protocol stats
+	_, err = db.Exec(`
+		INSERT INTO protocol_stats (app_stats_id, protocol, packet_count)
+		VALUES (?, ?, ?)
+		ON CONFLICT (app_stats_id, protocol) 
+		DO UPDATE SET packet_count = ?
+	`, appStatsID, protocol, packetCount, packetCount)
+
+	if err != nil {
+		return fmt.Errorf("failed to update protocol stats: %v", err)
+	}
+
+	return nil
 }

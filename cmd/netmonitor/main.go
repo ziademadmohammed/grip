@@ -3,12 +3,10 @@ package main
 import (
 	"flag"
 	"fmt"
-	"log"
 	"os"
 	"strings"
 	"time"
 
-	util "grip/internal"
 	"grip/internal/capture"
 	"grip/internal/logger"
 
@@ -48,6 +46,30 @@ func init() {
 	flag.BoolVar(&enableFile, "log-file", false, "Enable file logging")
 	flag.StringVar(&logFilePath, "log-path", "logs/netmonitor.log", "Path to log file (if file logging enabled)")
 	flag.BoolVar(&useColors, "log-colors", true, "Use colors in console output")
+}
+
+// initMainLogger initializes the logger for the main package before capture is initialized
+func initMainLogger() error {
+	// Validate logging configuration
+	if enableFile && logFilePath == "" {
+		return fmt.Errorf("log file path must be specified when file logging is enabled")
+	}
+
+	// Create logger configuration
+	config := logger.LoggerConfig{
+		EnableError:   enableError,
+		EnableWarning: enableWarning,
+		EnableInfo:    enableInfo,
+		EnableDebug:   enableDebug,
+		EnableTrace:   enableTrace,
+		EnableConsole: enableConsole,
+		EnableFile:    enableFile,
+		LogFilePath:   logFilePath,
+		UseColors:     useColors,
+	}
+
+	// Initialize the logger package directly
+	return logger.Initialize(config)
 }
 
 func configureLogging() error {
@@ -90,13 +112,13 @@ func (m *netmonitor) Execute(args []string, r <-chan svc.ChangeRequest, changes 
 
 	// Configure logging
 	if err := configureLogging(); err != nil {
-		log.Printf("Failed to configure logging: %v", err)
+		logger.Error("Failed to configure logging: %v", err)
 		return true, 1
 	}
 
 	// Start packet capture
 	if err := capture.StartCapture(); err != nil {
-		log.Printf("Failed to start capture: %v", err)
+		logger.Error("Failed to start capture: %v", err)
 		return true, 1
 	}
 
@@ -125,7 +147,7 @@ func (m *netmonitor) Execute(args []string, r <-chan svc.ChangeRequest, changes 
 		case svc.Continue:
 			changes <- svc.Status{State: svc.Running, Accepts: cmdsAccepted}
 		default:
-			log.Printf("unexpected control request #%d", c)
+			logger.Warning("Unexpected control request #%d", c)
 		}
 	}
 	return
@@ -135,22 +157,67 @@ func printStatistics() {
 	stats := capture.GetStatistics()
 	uptime := time.Since(stats.StartTime)
 
-	capture.LogInfo("=== Network Statistics ===")
-	capture.LogInfo("Uptime: %v", uptime.Round(time.Second))
-	capture.LogInfo("Total Packets: %d", stats.TotalPackets.Load())
-	capture.LogInfo("Total Bytes: %d", stats.TotalBytes.Load())
-	capture.LogInfo("Packets/Second: %.2f", float64(stats.TotalPackets.Load())/uptime.Seconds())
-	capture.LogInfo("Bytes/Second: %.2f", float64(stats.TotalBytes.Load())/uptime.Seconds())
+	logger.Info("=== Network Statistics ===")
+	logger.Info("Uptime: %v", uptime.Round(time.Second))
+	logger.Info("Total Packets: %d", stats.TotalPackets.Load())
+	logger.Info("Total Bytes: %d", stats.TotalBytes.Load())
+	logger.Info("Packets/Second: %.2f", float64(stats.TotalPackets.Load())/uptime.Seconds())
+	logger.Info("Bytes/Second: %.2f", float64(stats.TotalBytes.Load())/uptime.Seconds())
 
-	capture.LogInfo("Protocol Distribution:")
+	logger.Info("Protocol Distribution:")
 	stats.PacketsByProtocol.Range(func(key, value interface{}) bool {
 		protocol := key.(string)
 		count := value.(uint64)
 		percentage := float64(count) / float64(stats.TotalPackets.Load()) * 100
-		capture.LogInfo("  %s: %d (%.1f%%)", protocol, count, percentage)
+		logger.Info("  %s: %d (%.1f%%)", protocol, count, percentage)
 		return true
 	})
-	capture.LogInfo("=====================")
+
+	// Get per-application statistics
+	appStats := capture.GetApplicationStats()
+	if len(appStats) > 0 {
+		logger.Info("=== Application Statistics ===")
+
+		for appName, app := range appStats {
+			logger.Info("Application: %s (PID: %d)", appName, app.ProcessID)
+			logger.Info("  Total Packets: %d", app.TotalPackets.Load())
+			logger.Info("  Total Bytes: %d", app.TotalBytes.Load())
+
+			// Protocol breakdown for this app
+			logger.Info("  Protocol Distribution:")
+			app.PacketsByProtocol.Range(func(key, value interface{}) bool {
+				protocol := key.(string)
+				count := value.(uint64)
+				percentage := float64(count) / float64(app.TotalPackets.Load()) * 100
+				logger.Info("    %s: %d (%.1f%%)", protocol, count, percentage)
+				return true
+			})
+
+			// List destinations this app has connected to
+			destinations := capture.GetDestinationsForApp(appName)
+			if len(destinations) > 0 {
+				logger.Info("  Connected to %d destinations:", len(destinations))
+
+				// Limit to max 10 destinations in log to avoid spam
+				maxDisplay := 10
+				if len(destinations) < maxDisplay {
+					maxDisplay = len(destinations)
+				}
+
+				for i := 0; i < maxDisplay; i++ {
+					logger.Info("    %s", destinations[i])
+				}
+
+				if len(destinations) > maxDisplay {
+					logger.Info("    ... and %d more", len(destinations)-maxDisplay)
+				}
+			}
+
+			logger.Info("  ---------------------")
+		}
+	}
+
+	logger.Info("=====================")
 }
 
 func runService(isDebug bool) {
@@ -161,7 +228,7 @@ func runService(isDebug bool) {
 		err = svc.Run(svcName, &netmonitor{})
 	}
 	if err != nil {
-		log.Printf("Service failed: %v", err)
+		logger.Error("Service failed: %v", err)
 	}
 }
 
@@ -235,38 +302,40 @@ func main() {
 		usage("no command specified")
 	}
 
-	// Check admin privileges first - do this before any other operations
-	isAdmin, err := util.IsRunningAsAdmin()
-	if err != nil {
-		log.Fatalf("Failed to check administrator privileges: %v", err)
-	}
-
-	if !isAdmin {
-		log.Fatalf("ADMINISTRATOR PRIVILEGES REQUIRED: This application requires administrator privileges to function properly. Please run as administrator.")
+	// Initialize main logger before anything else
+	if err := initMainLogger(); err != nil {
+		fmt.Printf("FATAL: Failed to initialize logger: %v\n", err)
+		os.Exit(1)
 	}
 
 	cmd := strings.ToLower(flag.Args()[0])
 	switch cmd {
 	case "debug":
-		log.Printf("Starting in debug mode")
+		logger.Info("Starting in debug mode")
 		if err := configureLogging(); err != nil {
-			log.Fatalf("Failed to configure logging: %v", err)
+			logger.Error("Failed to configure logging: %v", err)
+			os.Exit(1)
 		}
 		if err := capture.StartCapture(); err != nil {
-			log.Fatal(err)
+			logger.Error("%v", err)
+			os.Exit(1)
 		}
 		// Wait indefinitely
 		select {}
 	case "install":
 		err := installService()
 		if err != nil {
-			log.Fatalf("failed to install: %v", err)
+			logger.Error("Failed to install: %v", err)
+			os.Exit(1)
 		}
+		logger.Info("Service installed successfully")
 	case "remove":
 		err := removeService()
 		if err != nil {
-			log.Fatalf("failed to remove: %v", err)
+			logger.Error("Failed to remove: %v", err)
+			os.Exit(1)
 		}
+		logger.Info("Service removed successfully")
 	case "start", "stop", "pause", "continue":
 		runService(false)
 	default:
