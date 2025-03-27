@@ -1,0 +1,6 @@
+- Capture packet and collect statistics on them 
+    - realtime bandwidth monitoring for entire interface and per app
+    - hosts that each app is connecting to. not just the ip address
+    - improved app detecion 
+- control packets and traffic (blocking trafiic for apps or domains)
+- detect and see other devices on the network. and possibly control bandwidth allocation for them

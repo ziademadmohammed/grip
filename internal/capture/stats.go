@@ -2,6 +2,7 @@ package capture
 
 import (
 	"encoding/json"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -33,7 +34,7 @@ type Statistics struct {
 
 var stats Statistics
 var statsMutex sync.RWMutex
-var saveInterval = time.Minute / 2
+var saveInterval = 10 * time.Second // Changed to 10 seconds
 
 func init() {
 	stats = Statistics{
@@ -56,8 +57,8 @@ func GetStatistics() Statistics {
 	return stats
 }
 
-// updateStats updates the total packet and byte counts
-func updateStats(bytes uint64) {
+// updateGlobalStats updates the total packet and byte counts
+func updateGlobalStats(bytes uint64) {
 	stats.TotalPackets.Add(1)
 	stats.TotalBytes.Add(bytes)
 }
@@ -65,12 +66,12 @@ func updateStats(bytes uint64) {
 // updateAppStats updates statistics for a specific application
 func updateAppStats(processID uint32, processName, processPath string,
 	protocol string, bytes uint64, destination string) {
-	if processName == "" {
+	if processPath == "" {
 		return // Skip unknown applications
 	}
 
-	// Use process name as key for the app stats
-	key := processName
+	// Use last segment of process path as key for the app stats
+	key := filepath.Base(processPath)
 
 	// Get or create application stats
 	appStatsObj, _ := stats.ApplicationStats.LoadOrStore(key, &ApplicationStats{
@@ -253,8 +254,77 @@ func saveAppStatsToDB(appStats *ApplicationStats) {
 	LogDebug("Successfully saved stats for application: %s", appStats.ProcessName)
 }
 
+// LoadStatsFromDB loads existing statistics from the database
+func LoadStatsFromDB() {
+	LogInfo("Loading statistics from database...")
+
+	// Check if database is initialized
+	if !database.IsInitialized() {
+		LogError("Cannot load stats: database not initialized")
+		return
+	}
+
+	// Load application stats
+	appStats, err := database.GetAllAppStats()
+	if err != nil {
+		LogError("Failed to load application statistics: %v", err)
+		return
+	}
+
+	count := 0
+	// Process each app's stats
+	for _, dbAppStat := range appStats {
+		appStat := &ApplicationStats{
+			ProcessID:     dbAppStat.ProcessID,
+			ProcessName:   dbAppStat.ProcessName,
+			ProcessPath:   dbAppStat.ProcessPath,
+			LastSavedToDB: time.Now(),
+		}
+
+		// Set packet and byte counts
+		appStat.TotalPackets.Store(dbAppStat.TotalPackets)
+		appStat.TotalBytes.Store(dbAppStat.TotalBytes)
+
+		// Load protocol stats for this app
+		protocols, err := database.GetProtocolStatsForApp(dbAppStat.ID)
+		if err != nil {
+			LogError("Failed to load protocol stats for %s: %v", dbAppStat.ProcessName, err)
+		} else {
+			// Store protocol stats
+			for _, proto := range protocols {
+				appStat.PacketsByProtocol.Store(proto.Protocol, proto.PacketCount)
+			}
+		}
+
+		// Load destinations
+		if dbAppStat.Destinations != "" {
+			var destinations []string
+			if err := json.Unmarshal([]byte(dbAppStat.Destinations), &destinations); err != nil {
+				LogError("Failed to parse destinations for %s: %v", dbAppStat.ProcessName, err)
+			} else {
+				// Store destinations in map
+				for _, dest := range destinations {
+					appStat.Destinations.Store(dest, true)
+				}
+			}
+		}
+
+		// Store in memory
+		stats.ApplicationStats.Store(dbAppStat.ProcessName, appStat)
+		count++
+	}
+
+	LogInfo("Loaded statistics for %d applications from database", count)
+}
+
 // saveStatsPeriodically saves statistics to the database at regular intervals
 func saveStatsPeriodically() {
+	// Wait a moment for the database to initialize
+	time.Sleep(2 * time.Second)
+
+	// Load existing stats from database
+	LoadStatsFromDB()
+
 	ticker := time.NewTicker(saveInterval)
 	defer ticker.Stop()
 

@@ -50,6 +50,12 @@ type ApplicationStats struct {
 	LastSeen     time.Time
 }
 
+// ProtocolStat represents protocol statistics for an application
+type ProtocolStat struct {
+	Protocol    string
+	PacketCount uint64
+}
+
 func getDefaultDBPath() (string, error) {
 	appData := os.Getenv("LOCALAPPDATA")
 	if appData == "" {
@@ -506,4 +512,77 @@ func StoreProtocolStats(appName string, processID uint32, protocol string, packe
 	}
 
 	return nil
+}
+
+// GetAllAppStats returns all application statistics from the database
+func GetAllAppStats() ([]*ApplicationStats, error) {
+	if db == nil {
+		return nil, fmt.Errorf("database not initialized")
+	}
+
+	rows, err := db.Query(`
+		SELECT id, process_id, process_name, process_path, 
+		       total_packets, total_bytes, destinations,
+		       first_seen, last_seen
+		FROM application_stats
+		ORDER BY total_packets DESC
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query application stats: %v", err)
+	}
+	defer rows.Close()
+
+	var appStats []*ApplicationStats
+	for rows.Next() {
+		appStat := &ApplicationStats{}
+		var firstSeen, lastSeen time.Time
+		err := rows.Scan(
+			&appStat.ID,
+			&appStat.ProcessID,
+			&appStat.ProcessName,
+			&appStat.ProcessPath,
+			&appStat.TotalPackets,
+			&appStat.TotalBytes,
+			&appStat.Destinations,
+			&firstSeen,
+			&lastSeen,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan application stats: %v", err)
+		}
+		appStat.FirstSeen = firstSeen
+		appStat.LastSeen = lastSeen
+		appStats = append(appStats, appStat)
+	}
+
+	return appStats, nil
+}
+
+// GetProtocolStatsForApp returns protocol statistics for a specific application
+func GetProtocolStatsForApp(appStatsID int64) ([]ProtocolStat, error) {
+	if db == nil {
+		return nil, fmt.Errorf("database not initialized")
+	}
+
+	rows, err := db.Query(`
+		SELECT protocol, packet_count
+		FROM protocol_stats
+		WHERE app_stats_id = ?
+	`, appStatsID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query protocol stats: %v", err)
+	}
+	defer rows.Close()
+
+	var protocolStats []ProtocolStat
+	for rows.Next() {
+		var proto ProtocolStat
+		err := rows.Scan(&proto.Protocol, &proto.PacketCount)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan protocol stats: %v", err)
+		}
+		protocolStats = append(protocolStats, proto)
+	}
+
+	return protocolStats, nil
 }

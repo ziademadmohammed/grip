@@ -336,6 +336,7 @@ func processPacket(deviceName string, packet gopacket.Packet) {
 	packetRecord := createPacketRecord(deviceName, src, srcPort, dst, dstPort, protocol, length, direction, processInfo)
 	StorePacketRecord(packetRecord)
 	logPacket(packetRecord)
+	updateGlobalStats(uint64(length))
 
 	// Create and store packet record
 }
