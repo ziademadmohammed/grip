@@ -128,7 +128,7 @@ func lookupProcessInfo(protocol string, srcPortInt, dstPortInt uint16, direction
 		if err == nil {
 			return info, nil
 		}
-		LogDebug("Source TCP lookup failed for outgoing traffic: %v", err)
+		// LogDebug("Source TCP lookup failed for outgoing traffic: %v", err)
 	}
 
 	if protocol == "TCP" && (direction == "incoming" || direction == "internal") {
@@ -137,7 +137,7 @@ func lookupProcessInfo(protocol string, srcPortInt, dstPortInt uint16, direction
 		if err == nil {
 			return info, nil
 		}
-		LogDebug("Destination TCP lookup failed for incoming traffic: %v", err)
+		// LogDebug("Destination TCP lookup failed for incoming traffic: %v", err)
 	}
 
 	// For UDP traffic
@@ -147,7 +147,7 @@ func lookupProcessInfo(protocol string, srcPortInt, dstPortInt uint16, direction
 		if err == nil {
 			return info, nil
 		}
-		LogDebug("Source UDP lookup failed for outgoing traffic: %v", err)
+		// LogDebug("Source UDP lookup failed for outgoing traffic: %v", err)
 	}
 
 	if protocol == "UDP" && (direction == "incoming" || direction == "internal") {
@@ -156,12 +156,12 @@ func lookupProcessInfo(protocol string, srcPortInt, dstPortInt uint16, direction
 		if err == nil {
 			return info, nil
 		}
-		LogDebug("Destination UDP lookup failed for incoming traffic: %v", err)
+		// LogDebug("Destination UDP lookup failed for incoming traffic: %v", err)
 	}
 
 	// If we reach here, all applicable checks failed
-	LogError("Failed to find process for %s traffic (%s) between ports %d and %d",
-		protocol, direction, srcPortInt, dstPortInt)
+	// LogError("Failed to find process for %s traffic (%s) between ports %d and %d",
+	// 	protocol, direction, srcPortInt, dstPortInt)
 	return nil, fmt.Errorf("process not found")
 }
 
@@ -192,6 +192,17 @@ func createPacketRecord(deviceName, src, srcPort, dst, dstPort, protocol string,
 		record.ProcessID = processInfo.ProcessID
 		record.ProcessName = processInfo.ProcessName
 		record.ProcessPath = processInfo.ExecutablePath
+
+		// If process name is empty, use the last segment of the process path
+		if record.ProcessName == "" && record.ProcessPath != "" {
+			// Split by both forward and backward slashes for cross-platform compatibility
+			pathParts := strings.FieldsFunc(record.ProcessPath, func(c rune) bool {
+				return c == '/' || c == '\\'
+			})
+			if len(pathParts) > 0 {
+				record.ProcessName = pathParts[len(pathParts)-1]
+			}
+		}
 
 		// Update application-specific statistics
 		destination := dst
@@ -329,8 +340,7 @@ func processPacket(deviceName string, packet gopacket.Packet) {
 	// Look up process information
 	processInfo, err := lookupProcessInfo(protocol, srcPortInt, dstPortInt, direction)
 	if err != nil {
-		LogError("Process lookup failed for %s:%s -> %s:%s (%s): %v",
-			src, srcPort, dst, dstPort, protocol, err)
+		LogError("Process lookup failed: %v", err)
 	}
 
 	packetRecord := createPacketRecord(deviceName, src, srcPort, dst, dstPort, protocol, length, direction, processInfo)
